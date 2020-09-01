@@ -1,0 +1,70 @@
+// localhost
+"62767" meta [IsParameterQuery=true, Type="Text", IsParameterQueryRequired=true]
+
+// catalog_name
+"0b8baf3c-3524-4931-bdfa-3c61c5c97a24" meta [IsParameterQuery=true, Type="Text", IsParameterQueryRequired=true]
+
+// localhostClean
+let
+    Source = "localhost:" & Text.Replace(localhost, "localhost:", "")
+in
+    Source
+
+// TablePermissions
+let
+    Source = AnalysisServices.Database(localhostClean, catalog_name, [Query="SELECT [FilterExpression], [TableID], [RoleID]#(lf)from $SYSTEM.TMSCHEMA_TABLE_PERMISSIONS #(lf)"])
+in
+    Source
+
+// Roles
+let
+    Source = AnalysisServices.Database(localhostClean, catalog_name, [Query="SELECT [ID] AS [RoleID], [Name] AS [RoleName] FROM#(lf)#(tab)$SYSTEM.TMSCHEMA_ROLES#(lf)"]),
+    #"Merged Queries" = Table.NestedJoin(Source, {"RoleID"}, TablePermissions, {"RoleID"}, "TablePermissions", JoinKind.LeftOuter),
+    #"Added Custom" = Table.AddColumn(#"Merged Queries", "Custom", each List.Sum([TablePermissions][TableID])),
+    #"Aggregated TablePermissions1" = Table.AggregateTableColumn(#"Added Custom", "TablePermissions", {{"TableID", List.Count, "Sum of TablePermissions.TableID"}}),
+    #"Added Custom1" = Table.AddColumn(#"Aggregated TablePermissions1", "Custom.1", each if [Custom] = null then 0 else 1),
+    #"Removed Columns" = Table.RemoveColumns(#"Added Custom1",{"Custom"}),
+    #"Inserted Multiplication" = Table.AddColumn(#"Removed Columns", "Number of Tables filtered", each [Sum of TablePermissions.TableID] * [Custom.1], Int64.Type),
+    #"Removed Columns1" = Table.RemoveColumns(#"Inserted Multiplication",{"Sum of TablePermissions.TableID", "Custom.1"})
+in
+    #"Removed Columns1"
+
+// Tables
+let
+    Source = AnalysisServices.Database(localhostClean, catalog_name, [Query="select [ID] AS [TableID], [NAME] AS [TableName]#(lf)from $SYSTEM.TMSCHEMA_TABLES#(lf)"]),
+    #"Merged Queries" = Table.NestedJoin(Source, {"TableID"}, Relationships, {"FromTableID"}, "Relationships", JoinKind.LeftOuter),
+    #"Expanded Relationships" = Table.ExpandTableColumn(#"Merged Queries", "Relationships", {"Filtered by Tables"}, {"Filtered by Tables"})
+in
+    #"Expanded Relationships"
+
+// Relationships
+let
+    Source = AnalysisServices.Database(localhostClean, catalog_name, [Query="select [FromTableID], [FromCardinality], [ToTableID], [ToCardinality], [IsActive] #(lf)from $SYSTEM.TMSCHEMA_RELATIONSHIPS#(lf)"]),
+    #"Merged Queries1" = Table.NestedJoin(Source, {"ToTableID"}, TablePermissions, {"TableID"}, "TablePermissions" , JoinKind.Inner),
+    #"Filtered Rows" = Table.SelectRows(#"Merged Queries1", each ([IsActive] = true)),
+    #"Removed Columns" = Table.RemoveColumns(#"Filtered Rows",{"TablePermissions"}),
+    #"Merged Queries" = Table.NestedJoin(#"Removed Columns", {"ToTableID"}, #"Tables (2)", {"TableID"}, "Tables (2)", JoinKind.LeftOuter),
+    #"Expanded Tables (2)" = Table.ExpandTableColumn(#"Merged Queries", "Tables (2)", {"TableName"}, {"To.TableName"}),
+    #"Grouped Rows" = Table.Group(#"Expanded Tables (2)", {"FromTableID"}, {{"Filtered by Tables", each Text.Combine([To.TableName], "; "), Text.Type}})
+in
+    #"Grouped Rows"
+
+// Tables (2)
+let
+    Source = AnalysisServices.Database(localhostClean, catalog_name, [Query="select [ID] AS [TableID], [NAME] AS [TableName]#(lf)from $SYSTEM.TMSCHEMA_TABLES#(lf)"])
+in
+    Source
+
+// Refreshed
+let
+   StandardLocal = -6, 
+   UTC_Time = DateTimeZone.FixedUtcNow(),
+   CurrentYear = Date.Year( DateTimeZone.SwitchZone( UTC_Time,StandardLocal)),
+   DST_Start = Date.StartOfWeek(#datetimezone( CurrentYear,3,14,0,0,0,StandardLocal,0),Day.Sunday) + #duration(0,2,0,0),
+   DST_End = Date.StartOfWeek( #datetimezone( CurrentYear, 11,7,0,0,0, StandardLocal+1,0),Day.Sunday) + #duration(0,2,0,0), 
+   AdjustDST = if UTC_Time >= DST_Start and UTC_Time < DST_End then StandardLocal + 1 else StandardLocal, 
+   Source = #table(type table [LastRefresh=datetimezone], {{UTC_Time}}),
+   #"Add Local Column" = Table.AddColumn(Source, "Refreshed", each DateTimeZone.SwitchZone(DateTimeZone.FixedUtcNow(),AdjustDST), DateTime.Type),
+   Refreshed = #"Add Local Column"{0}[Refreshed]
+in
+   Refreshed
